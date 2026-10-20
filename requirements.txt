@@ -1,0 +1,22 @@
+# 葡萄无损抓取机器人 —— Python 依赖
+#
+# 说明：在 K1 板子上建议用 apt 安装 OpenCV（预编译，支持 RISC-V）：
+#     sudo apt install -y python3-opencv python3-numpy python3-serial python3-yaml
+#
+# 下面的 pip 列表主要用于在 PC 上做算法开发/调试。
+
+# 串口（PS01 力传感器走 USB-TTL）
+pyserial>=3.5
+
+# 配置解析
+PyYAML>=6.0
+
+# 数值计算
+numpy>=1.24
+
+# 图像处理与识别
+#   板子上请用 apt 的 python3-opencv，不要 pip 装（RISC-V 无预编译 wheel，会本地编译很久）
+opencv-python>=4.8; platform_machine != "riscv64"
+
+# 测试
+pytest>=7.4
