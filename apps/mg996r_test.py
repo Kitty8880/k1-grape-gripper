@@ -239,7 +239,7 @@ class GpiozeroServo:
             pass
 
     def describe(self) -> str:
-        return (f"gpiozero.Servo(GPIO{pin}) "
+        return (f"gpiozero.Servo(GPIO{self.pin}) "
                 f"pulse={self.pulse_min_us}-{self.pulse_max_us}us "
                 f"period={self.period_us}us")
 
