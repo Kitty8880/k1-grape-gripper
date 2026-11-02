@@ -447,9 +447,278 @@ class K1SarAdc(AdcDriver):
         return f"K1 SARADC @ {self._base}"
 
 
+class Ps01Adc(AdcDriver):
+    """
+    PS01 光学力传感器，作为"ADC"接入力采集框架。
+
+    设计说明
+    --------
+    PS01 不是真正的 ADC，而是通过 UART 持续推流三路 PD 读数（约 135 Hz）。
+    为了复用现有的 ``ForceSensor`` / ``ForceSensorPair`` 逻辑，
+    这里把它包装成 :class:`AdcDriver`：
+
+        · "通道" = PD 通道（1 / 2 / 3）
+        · ``read_raw(channel)`` 返回最新的 PD 读数
+
+    底层由 :class:`grape_gripper.ps01.Ps01Reader` 的后台线程持续采集，
+    调用方随时取最新值，不会阻塞。
+
+    ⚠️ PS01 的原始读数是六位数量级（空载约 680,000），不是 ADC 的 0~32767。
+       标定时请把 ``sensor.calib.*.raw_zero`` 设成实测的空载值。
+    """
+
+    name = "ps01"
+
+    #: ADC 通道号 → PS01 的 PD 通道号
+    DEFAULT_CHANNEL_MAP = {0: 1, 1: 2, 2: 3}
+
+    def __init__(self,
+                 port: str = "/dev/ttyUSB0",
+                 baudrate: int = 115200,
+                 channel_map: Optional[dict] = None,
+                 warmup_s: float = 1.0):
+        from .ps01 import Ps01Error, Ps01Reader
+
+        self.port = port
+        self.baudrate = baudrate
+        self.channel_map = dict(channel_map or self.DEFAULT_CHANNEL_MAP)
+
+        try:
+            self._reader = Ps01Reader(port, baudrate)
+            self._reader.open()
+        except Ps01Error:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise SensorError(f"PS01 初始化失败：{exc}") from exc
+
+        # 等第一帧数据；初始化日志约 49~51 行，通常 0.3~0.5 秒
+        if not self._reader.wait_first_sample(timeout=max(2.0, warmup_s)):
+            stats = self._reader.stats()
+            self._reader.close()
+            raise SensorError(
+                f"PS01 在 {warmup_s:.1f}s 内没有输出数据。\n"
+                f"  端口：{port}  统计：{stats}\n"
+                "  检查：\n"
+                "    1. 接线是否正确（TXD↔RXD 交叉）\n"
+                "    2. 启动命令是否含 0xD4 唤醒字节\n"
+                "    3. 传感器供电是否为 3.3V"
+            )
+
+        # 丢弃前几帧，等读数稳定
+        time.sleep(warmup_s)
+
+    def read_raw(self, channel: int) -> float:
+        """返回指定 ADC 通道对应的 PD 读数。"""
+        pd_ch = self.channel_map.get(channel)
+        if pd_ch is None:
+            raise SensorError(f"PS01 没有配置通道 {channel}（可用：{list(self.channel_map)}）")
+        value = self._reader.channel(pd_ch)
+        if value is None:
+            return 0.0
+        return float(value)
+
+    @property
+    def reader(self):
+        """暴露底层读取器，便于诊断。"""
+        return self._reader
+
+    def stats(self) -> dict:
+        return self._reader.stats()
+
+    def close(self) -> None:
+        try:
+            self._reader.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def describe(self) -> str:
+        return (f"Ps01Adc({self.port}@{self.baudrate} "
+                f"samples={self._reader.sample_count} "
+                f"PD1={self._reader.pd1} PD2={self._reader.pd2} PD3={self._reader.pd3})")
+
+
+class Ps01DualAdc(AdcDriver):
+    """
+    双 PS01 传感器 —— 左右夹指各一只。
+
+    通道映射（默认）
+    ----------------
+        0 → 传感器 A 的 PD1（左夹指）
+        1 → 传感器 B 的 PD1（右夹指）
+
+    为什么这样做，而不是做差分（2026-10-25 实测依据）
+    -------------------------------------------------
+    同时读两只，实测：
+
+    ==================  ==============  ============
+    信号                 噪声 σ（计数）   相对单只 A
+    ==================  ==============  ============
+    单只 A               4,199           1.00x
+    单只 B               2,986           0.71x
+    差分 A-B             4,421           1.05x   ❌
+    **平均 (A+B)/2**     **2,896**       **0.69x** ✅
+    ==================  ==============  ============
+
+    两者的噪声相关系数只有 **+0.279**（弱相关），所以：
+      · 做差**不能**抵消噪声（反而比单只还差）
+      · 但做平均能降噪 31% —— 因为独立噪声在平均时会互相抵消
+
+    物理上这是合理的：**对称夹持静止物体时，左右两侧法向力必然相等**
+    （牛顿第三定律），所以 A 和 B 测的是同一个力学量，平均它们不是"凑数"。
+
+    另外 ``|A-B|`` 反映物体是否夹正 —— 偏心时两指受力不等，
+    可以用来做"偏心检测"（见 sensor.pair.asymmetry）。
+
+    硬件差异备忘
+    ------------
+    实测两只的 USB 转串口芯片不同，启动行为也不同：
+
+    ==============  ================  ================================
+    传感器          USB 芯片          打开时的行为
+    ==============  ================  ================================
+    A（左）         CH340             自动打印约 50 行初始化日志
+    B（右）         PL2303            **一行都没有**，直接等启动命令
+    ==============  ================  ================================
+
+    所以 :class:`Ps01Reader` 不能用"有没有看到初始化日志"判断成败 ——
+    见 ``ps01.py`` 里 ``open()`` 的说明。
+    """
+
+    name = "ps01_dual"
+
+    DEFAULT_CHANNEL_MAP = {0: 1, 1: 1}   # 通道0→A的PD1，通道1→B的PD1
+
+    def __init__(self,
+                 port_a: str = "/dev/ttyUSB0",
+                 port_b: str = "/dev/ttyUSB1",
+                 baudrate: int = 115200,
+                 pd_channel: int = 1,
+                 warmup_s: float = 1.0):
+        from .ps01 import Ps01Error, Ps01Reader
+
+        self.port_a = port_a
+        self.port_b = port_b
+        self.baudrate = baudrate
+        self.pd_channel = pd_channel
+        self._readers = {}
+
+        for tag, port in (("A", port_a), ("B", port_b)):
+            try:
+                r = Ps01Reader(port, baudrate)
+                r.open()
+            except Ps01Error as exc:
+                self.close()
+                raise SensorError(f"传感器 {tag}（{port}）打开失败：{exc}") from exc
+            except Exception as exc:  # noqa: BLE001
+                self.close()
+                raise SensorError(
+                    f"传感器 {tag}（{port}）初始化失败：{exc}") from exc
+
+            if not r.wait_first_sample(timeout=max(2.0, warmup_s)):
+                stats = r.stats()
+                self.close()
+                raise SensorError(
+                    f"传感器 {tag}（{port}）在 {warmup_s:.1f}s 内没有输出数据。\n"
+                    f"  统计：{stats}\n"
+                    "  检查：\n"
+                    "    1. ls /dev/ttyUSB* 是否两个设备都在\n"
+                    "    2. 接线是否正确（TXD↔RXD 交叉）\n"
+                    "    3. 传感器供电是否为 3.3V"
+                )
+            self._readers[tag] = r
+
+        # 丢弃前几帧，等读数稳定
+        time.sleep(warmup_s)
+
+    # ---- AdcDriver 接口 ----
+
+    def read_raw(self, channel: int) -> float:
+        """
+        返回指定通道的原始读数。
+
+            0 → 传感器 A（左）
+            1 → 传感器 B（右）
+            2 → (A+B)/2   ← 降噪 31% 的合成通道
+            3 → |A-B|     ← 偏心度（不是力，别用力的标定去换算）
+        """
+        a = self._raw_of("A")
+        b = self._raw_of("B")
+        if channel == 0:
+            return a
+        if channel == 1:
+            return b
+        if channel == 2:
+            return (a + b) / 2.0
+        if channel == 3:
+            return abs(a - b)
+        raise SensorError(
+            f"双传感器模式没有通道 {channel}（可用 0=A, 1=B, 2=平均, 3=差）")
+
+    def _raw_of(self, tag: str) -> float:
+        r = self._readers.get(tag)
+        if r is None:
+            return 0.0
+        v = r.channel(self.pd_channel)
+        return float(v) if v is not None else 0.0
+
+    @property
+    def readers(self) -> dict:
+        return dict(self._readers)
+
+    def stats(self) -> dict:
+        return {tag: r.stats() for tag, r in self._readers.items()}
+
+    def close(self) -> None:
+        for r in list(self._readers.values()):
+            try:
+                r.close()
+            except Exception:  # noqa: BLE001
+                pass
+        self._readers.clear()
+
+    def describe(self) -> str:
+        parts = []
+        for tag in ("A", "B"):
+            r = self._readers.get(tag)
+            if r is None:
+                continue
+            parts.append(f"{tag}({r.port} samples={r.sample_count} "
+                         f"PD1={r.pd1})")
+        return "Ps01DualAdc[" + "  ".join(parts) + "]"
+
+
 def create_adc(cfg) -> AdcDriver:
     """根据配置创建 ADC 驱动实例。"""
     adc_type = cfg.get_str("sensor.adc", "simulated").lower()
+
+    if adc_type in ("ps01", "ps01_dual"):
+        # 注意：PS01 是真实硬件，即使 hardware.simulate=true 也照样连接，
+        #      因为"模拟模式"只针对舵机和力的数值模型，不针对串口设备。
+        #      想纯模拟请把 sensor.adc 设成 "simulated"。
+        ps = cfg.get("sensor.ps01", {}) or {}
+        port_a = ps.get("port", "/dev/ttyUSB0")
+        port_b = ps.get("port_b")
+        dual = (adc_type == "ps01_dual") or bool(port_b)
+        if dual:
+            if not port_b:
+                raise SensorError(
+                    "双传感器模式需要在 config.yaml 里配置 sensor.ps01.port_b")
+            return Ps01DualAdc(
+                port_a=port_a,
+                port_b=port_b,
+                baudrate=int(ps.get("baudrate", 115200)),
+                pd_channel=int(ps.get("pd_channel", 1)),
+                warmup_s=float(ps.get("warmup_s", 1.0)),
+            )
+        channel_map = ps.get("channel_map")
+        if isinstance(channel_map, dict):
+            channel_map = {int(k): int(v) for k, v in channel_map.items()}
+        return Ps01Adc(
+            port=port_a,
+            baudrate=int(ps.get("baudrate", 115200)),
+            channel_map=channel_map,
+            warmup_s=float(ps.get("warmup_s", 1.0)),
+        )
 
     if cfg.simulate or adc_type == "simulated":
         sim = cfg.get("sensor.simulated", {}) or {}
@@ -478,7 +747,10 @@ def create_adc(cfg) -> AdcDriver:
     if adc_type == "k1_saradc":
         return K1SarAdc()
 
-    raise SensorError(f"未知的 sensor.adc 类型：{adc_type!r}")
+    raise SensorError(
+        f"未知的 sensor.adc 类型：{adc_type!r}"
+        "（可选 ps01 / ps01_dual / ads1115 / mcp3008 / k1_saradc / simulated）"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -611,6 +883,16 @@ class ForceSensorPair:
         if total <= 1e-6:
             return 0.0
         return abs(self.force_left_n - self.force_right_n) / total
+
+    @property
+    def imbalance_n(self) -> float:
+        """
+        两侧力差的**绝对值**（牛顿）。
+
+        和 ``asymmetry``（比例）的区别：这个是绝对量，适合设固定阈值。
+            夹持葡萄时 |L-R| > 0.3N  → 明显偏心，建议重夹
+        """
+        return abs(self.force_left_n - self.force_right_n)
 
     def tare(self, samples: int = 50) -> tuple[float, float]:
         return self.left.tare(samples), self.right.tare(samples)
