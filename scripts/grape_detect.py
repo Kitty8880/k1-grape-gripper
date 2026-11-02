@@ -43,9 +43,48 @@ for _s in (sys.stdout, sys.stderr):
 
 
 # HSV 阈值（OpenCV 的 H 范围是 0~179）
+#
+# ⚠️ 这些数值必须按**实际光照和葡萄品种**标定，不能照抄。
+#    标定方法：sudo python3 scripts/vision_diag.py --out debug
+#    它会打印画面里 H/S/V 的分布和推荐的区间。
 COLOR_RANGES = {
+    # ★ 2026-11-02 实测标定的深紫葡萄区间
+    #
+    #   实测（葡萄区域暗像素的中位数，OpenCV 标度）：
+    #       H = 140   （紫，本来就在 125~170 之间 ✅）
+    #       S =  33   （很低！深色葡萄本身就接近黑，饱和度不高）
+    #       V =  39   （很暗）
+    #
+    #   旧区间 (125,40,40)-(170,255,255) 的两个问题：
+    #     ① S≥40 和 V≥40 把葡萄本身刷掉了（实测只有 33 / 39）
+    #     ② 结果最大的连通块变成了**右边的键盘**（实心度 0.22，外框 568x832）
+    #
+    #   新区间的思路：**深色 + 有一定色相**，而不是"高饱和 + 高亮度"
+    #       V ≤ 130   → 排除白色桌面（V≈230）
+    #       S ≥ 15    → 排除灰色阴影（S≈0）
+    #       H 120~180 → 紫/品红
+    #
+    #   实测效果：最大连通块 352x336，正好落在葡萄位置，
+    #             实心度 0.46（葡萄有高光，掩码会断裂，属正常）
+    "darkpurple": [
+        ((120, 15, 15), (180, 255, 130)),
+    ],
+    # ★ 2026-11-02 补充：紫葡萄 + 绿葡萄都支持
+    #
+    #   绿葡萄实测（暖光室内，OpenCV 标度）：H = 28~33, S 高, V 中高
+    #   紫葡萄实测：H = 140, S ≈ 33, V ≈ 39
+    #
+    #   两个区间合成一个 "grape" 档，让同一套检测逻辑同时支持两个品种。
+    #
+    #   ⚠️ 代价：H 20~50 也覆盖木桌、纸箱、浅色木质地板等常见背景。
+    #      所以 **绿色区间比紫色区间更依赖 ROI 约束**（只认画面中央）。
+    #      如果误检严重，优先考虑用训练好的分类器替代 HSV。
+    "grape": [
+        ((120, 15, 15), (180, 255, 130)),   # 深紫/近黑葡萄
+        ((20, 45, 25), (50, 255, 225)),     # 绿/黄绿葡萄
+    ],
     "purple": [
-        # 紫葡萄：色相在 125~170，饱和度较高
+        # 普通紫葡萄（光照充足、颜色鲜艳时用这个）
         ((125, 40, 40), (170, 255, 255)),
     ],
     "green": [
@@ -59,6 +98,18 @@ COLOR_RANGES = {
     "any": [
         ((0, 40, 40), (179, 255, 255)),   # 兜底：任何有颜色的区域
     ],
+}
+
+#: 每种颜色档的默认判定阈值。
+#: 深色葡萄的掩码天然会断裂（表面高光），实心度和圆度都比浅色物体低，
+#: 所以 darkpurple 用更宽松的阈值 —— 否则会和实测一样被判掉。
+COLOR_DEFAULTS = {
+    "darkpurple": {"min_circularity": 0.45, "min_solidity": 0.40},
+    "grape": {"min_circularity": 0.45, "min_solidity": 0.40},
+    "purple": {"min_circularity": 0.60, "min_solidity": 0.72},
+    "green": {"min_circularity": 0.60, "min_solidity": 0.72},
+    "red": {"min_circularity": 0.60, "min_solidity": 0.72},
+    "any": {"min_circularity": 0.60, "min_solidity": 0.72},
 }
 
 
@@ -112,11 +163,11 @@ class GrapeDetector:
     """基于 HSV + 轮廓的葡萄检测器。"""
 
     def __init__(self,
-                 color: str = "purple",
+                 color: str = "darkpurple",
                  min_area: float = 1500,
                  max_area: float = 400000,
-                 min_circularity: float = 0.60,
-                 min_solidity: float = 0.72,
+                 min_circularity: float | None = None,
+                 min_solidity: float | None = None,
                  open_kernel: int = 5,
                  close_kernel: int = 11,
                  scale: float = 0.5,
@@ -131,9 +182,22 @@ class GrapeDetector:
           - circularity: 凸包圆度，越接近圆形越接近 1.0
           - solidity:    实际面积 / 凸包面积，实心球体接近 1.0
           - area:        面积落在合理区间
+
+        ⚠️ min_circularity / min_solidity 默认 None 表示"按颜色档取默认值"，
+           见 COLOR_DEFAULTS。深色葡萄的掩码会因表面高光而断裂，
+           实心度只有 0.4~0.5，如果用统一的 0.72 会把葡萄本身判掉
+           （2026-11-02 实测踩过）。
         """
         self.color = color
         self.ranges = COLOR_RANGES.get(color, COLOR_RANGES["purple"])
+
+        # 阈值按颜色档取默认值（调用方显式给了就用调用方的）
+        dflt = COLOR_DEFAULTS.get(color, COLOR_DEFAULTS["purple"])
+        if min_circularity is None:
+            min_circularity = dflt["min_circularity"]
+        if min_solidity is None:
+            min_solidity = dflt["min_solidity"]
+
         self.min_area = min_area
         self.max_area = max_area
         self.min_circularity = min_circularity
