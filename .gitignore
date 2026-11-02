@@ -41,3 +41,15 @@ Thumbs.db
 
 # ---- 日志 ----
 *.log
+
+# ---- 运行时产物（不入库）----
+debug/
+datasets/
+models/
+*.wav
+dbg/
+
+# ---- 课程作业 / 非本仓库交付物 ----
+results-course-demo/
+course/
+*.pptx

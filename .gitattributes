@@ -1,0 +1,15 @@
+# 统一换行符为 LF —— 本项目目标平台是 Linux，
+# 如果 .sh 文件带 CRLF，在板子上会报 "bad interpreter" 无法执行。
+* text=auto eol=lf
+
+*.sh   text eol=lf
+*.py   text eol=lf
+*.yaml text eol=lf
+*.md   text eol=lf
+
+# 二进制文件不做换行转换
+*.png  binary
+*.jpg  binary
+*.docx binary
+*.pptx binary
+*.pdf  binary
