@@ -74,6 +74,7 @@ from grape_gripper.config import Config, default_config_path   # noqa: E402
 #: HALF 是"半闭"—— 留足开口，保证不会夹到东西。
 GESTURES = {
     "ready": [("OPEN", 0.0), ("HALF", 0.0), ("OPEN", 0.0),
+              ("HALF", 0.0), ("OPEN", 0.0),
               ("HALF", 0.0), ("OPEN", 0.0)],
     "ack": [("HALF", 0.0), ("OPEN", 0.0)],
     "grasp": [("PRE", 0.0)],
@@ -82,8 +83,8 @@ GESTURES = {
 }
 
 #: 每个手势的默认速度倍数（1.0 = 正常；失败手势要急促）
-SPEED = {"ready": 1.0, "ack": 1.6, "grasp": 0.8,
-         "done": 1.0, "fail": 2.2}
+SPEED = {"ready": 1.25, "ack": 1.8, "grasp": 0.8,
+         "done": 1.3, "fail": 2.4}
 
 DESC = {
     "ready": "就绪 —— 张开/半闭 两下招手",
@@ -103,8 +104,10 @@ def main() -> int:
                     help="速度倍数（越大越快）")
     ap.add_argument("--half-us", type=float, default=950.0,
                     help="「半闭」位置的脉宽（默认 950，开口约 54mm）")
-    ap.add_argument("--step", type=float, default=18.0,
-                    help="每次脉宽变化的步长（µs），越小越平滑")
+    ap.add_argument("--step", type=float, default=30.0,
+                    help="每次脉宽变化的步长（µs）。⚠️ 太小反而更抖 —— "
+                         "MG996R 有约 5~10µs 的死区，12µs 的步长会让它"
+                         "一步步挪动，看起来是抖动而不是滑动。30µs 更连贯")
     ap.add_argument("--config", default=None)
     args = ap.parse_args()
 
@@ -152,23 +155,27 @@ def main() -> int:
             while p < to_us:
                 p = min(to_us, p + step)
                 servo.set_pulse_us(p)
-                time.sleep(0.012 / speed)
+                time.sleep(0.009 / speed)
         else:
             p = cur
             while p > to_us:
                 p = max(to_us, p - step)
                 servo.set_pulse_us(p)
-                time.sleep(0.012 / speed)
+                time.sleep(0.009 / speed)
         glide.cur = to_us
 
     glide.cur = pmax
     try:
         servo.set_pulse_us(pmax)
-        time.sleep(0.25)
+        # 先停一下再动，让"即将开始"这件事有存在感
+        time.sleep(0.8 if args.gesture == "ready" else 0.25)
 
         for key, hold in GESTURES[args.gesture]:
             glide(point[key])
-            time.sleep((hold + 0.12) / speed)
+            # 每个位置多停一下 —— 实测 0.12s 的停顿太快，
+            # 人一抬头动作已经过去了（2026-11-03 用户反馈看不到）。
+            # 开机招手是唯一的状态信号，必须显眼。
+            time.sleep((hold + 0.20) / speed)
 
         print(f"✅ 手势完成：{args.gesture}（{DESC[args.gesture]}）")
         return 0

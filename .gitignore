@@ -53,3 +53,12 @@ dbg/
 results-course-demo/
 course/
 *.pptx
+# ---- 训练数据与中间产物（体积大，不入库）----
+yolo_data/
+datasets_export/
+labels_export/
+ds.tgz
+yolo_dataset/
+runs/
+*.pt
+*.onnx
