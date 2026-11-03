@@ -163,6 +163,13 @@ def main() -> int:
                     help="滑移重试时夹持位置收紧多少微秒（脉宽减小=更紧）")
     ap.add_argument("--auto-lift", action="store_true",
                     help="不等待手动确认（自动流程用）")
+    ap.add_argument("--settle-check", type=float, default=0.8,
+                    help="达到目标后等多少秒再复测一次（默认 0.8）。"
+                         "复测力低于目标就继续闭合 —— 用来排除"
+                         "「噪声尖峰导致提前停止」。设 0 关闭")
+    ap.add_argument("--settle-tol", type=float, default=0.10,
+                    help="复测允许的低于目标的容差（默认 0.10N），"
+                         "低于 目标-容差 才判为噪声尖峰")
     ap.add_argument("--plateau-n", type=float, default=0.12,
                     help="判定「力进入平台期」的阈值（牛顿）："
                          "最近 3 步的力跨度小于它就认为舵机已堵转")
@@ -429,6 +436,7 @@ def main() -> int:
             prev_f = None
             cur_step = args.probe_step_fast
             force_hist = []        # 最近几拍的力，用于判断"平台期/舵机堵转"
+            stall_count = 0        # 连续多少次测力"数值完全不变"→ 数据流断裂
             while pulse > deepest:
                 # ★ 自适应步长：按观察到的"力对位置的梯度"决定走多大一步
                 #
@@ -442,28 +450,109 @@ def main() -> int:
                 if phase == 1:
                     cur_step = args.probe_step_fast
                 else:
-                    if prev_f is not None and prev_pulse is not None \
+                    rise = (f - prev_f) if prev_f is not None else 0.0
+
+                    # ★ 刹车优先于预测
+                    #
+                    #   2026-11-03 实测踩坑：力曲线在接触前是平的（梯度≈0），
+                    #   一接触就陡。用「上一步梯度」预测下一步，
+                    #   在拐点处必然预测错 —— 平的那一步之后恰好就是最陡的地方。
+                    #
+                    #   实测：890us +1.024N → 880us +1.023N（梯度 0，选了最大步长）
+                    #         → 870us +1.889N（一步跳 0.87N）
+                    #         → 860us +2.258N（目标 1.20N，过冲到接近硬上限 2.50N）
+                    #
+                    #   所以先看「刚才涨得快不快」：涨得快就立刻小步刹车，
+                    #   不去管梯度表算出什么。
+                    if rise > 0.30:
+                        cur_step = 1.5      # 刚才跳了一大截 → 立刻刹车
+                    elif rise > 0.12:
+                        cur_step = 2.0
+                    elif prev_f is not None and prev_pulse is not None \
                             and prev_pulse != pulse:
-                        grad = (f - prev_f) / abs(prev_pulse - pulse)
+                        grad = rise / abs(prev_pulse - pulse)
                         if grad > 0.05:
-                            cur_step = 2.0      # 很陡，小步防过冲
+                            cur_step = 2.0
                         elif grad > 0.02:
                             cur_step = 4.0
                         elif grad > 0.005:
                             cur_step = 8.0
                         else:
-                            cur_step = 12.0     # 很缓，大步推进
-                        cur_step = max(args.probe_step, min(12.0, cur_step))
+                            cur_step = 12.0   # 很缓，大步推进
+                    else:
+                        cur_step = args.probe_step
+
+                    # ★ 第二道保护：**离目标越近，步长越小**
+                    #
+                    #   光靠"上一步涨得快就刹车"不够 —— 因为刹车总是在
+                    #   已经跳完之后才生效。真正要防的是"在离目标很近时
+                    #   还敢跨一大步"。
+                    #
+                    #   实测 880us 时力已到 1.023N、目标 1.20N，
+                    #   只剩 0.18N，却选了 12us 的步长 →
+                    #   一步跨到 1.889N，直接过冲。
+                    #
+                    #   按剩余距离设上限：
+                    #       剩 >1.0N : 最多 12us
+                    #       剩 >0.6N : 最多 8us
+                    #       剩 >0.3N : 最多 4us
+                    #      剩 ≤0.3N : 最多 2us
+                    remaining = cur_target - f
+                    if remaining <= 0.3:
+                        cur_step = min(cur_step, 2.0)
+                    elif remaining <= 0.6:
+                        cur_step = min(cur_step, 4.0)
+                    elif remaining <= 1.0:
+                        cur_step = min(cur_step, 8.0)
+
+                    # ⚠️ 这里**只能**用绝对上下限，绝不掺 probe_step 当下限。
+                    #    早期写成 max(args.probe_step, ...)（probe_step 默认 3.0），
+                    #    导致「2µs 防过冲」那条分支永远不生效，等于没写。
+                    cur_step = max(1.5, min(12.0, cur_step))
 
                 win = args.win_fast if phase == 1 else args.win_fine
                 pulse = max(deepest, pulse - cur_step)
                 servo.set_pulse_us(pulse)
                 time.sleep(args.probe_settle)
 
-                f, _, _ = measure(win)
+                f, _, n_distinct = measure(win)
                 raw_med = f * k + raw_zero          # 还原成原始计数，便于比对
                 f -= f_base
                 result["force"] = f
+
+                # ★★★ 传感器数据停滞检测
+                #
+                #   2026-11-03 实测踩到：19 步的原始计数全是 682,194，
+                #   一个数都没变。真实读数永远在抖（σ≈4,199 计数），
+                #   所以"完全不变"说明串口流断了（读线程死了 / USB 掉了 /
+                #   端口没释放），**不是力为 0，也不是夹不住**。
+                #
+                #   不加这个检测的话，程序会把故障当成"力一直是 0"，
+                #   最后报「力不足」—— 诊断方向完全错了，
+                #   排查时会白白怀疑机械结构和葡萄大小。
+                if n_distinct <= 1:
+                    stall_count += 1
+                else:
+                    stall_count = 0
+                if stall_count >= 3:
+                    print(f"   ❌ 传感器数据停滞：连续 {stall_count} 次测力，"
+                          f"原始计数一直是 {raw_med:.0f}（一次都没变）")
+                    print(f"      真实读数应当持续抖动（σ≈4,199 计数）。"
+                          f"完全不变 = 串口数据流已断。")
+                    print(f"      排查顺序：")
+                    print(f"        1) ls -l /dev/ttyUSB*        ← 串口还在吗")
+                    print(f"        2) sudo pkill -f product_mode; sudo pkill -f grasp")
+                    print(f"        3) sudo python3 scripts/ps01_dual_test.py --seconds 8")
+                    print(f"        4) 仍无数据 → 拔插两个 USB 转接头")
+                    result["reason"] = "sensor_stalled"
+                    result["ok"] = False
+                    # 立即张开卸力，不要带着未确认的夹持状态停在原地
+                    try:
+                        servo.set_pulse_us(pmax)
+                        time.sleep(1.0)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return 1
 
                 sigma_win = SIGMA_1S / (win ** 0.5)
                 limit_eff = max(cur_max, cur_target + 3.0 * sigma_win)
@@ -496,7 +585,39 @@ def main() -> int:
                     time.sleep(1.5)
                     return 1
                 if hit_count >= 2:
-                    print(f"   ✅ 力达到目标 {cur_target:.2f}N（连续 2 次），"
+                    # ★★ 确认之后必须**复测**，防止噪声尖峰导致提前停
+                    #
+                    #   2026-11-03 用户实测反馈：夹爪在精调过程中仍有抖动，
+                    #   有时力读数偶然冲到 1.2N 两次 → 判定"到位"停止闭合，
+                    #   但稳态力其实只有 1.05N，结果夹不牢。
+                    #
+                    #   机制：真实力 1.05N 时，σ≈0.24N 的噪声要连出两次
+                    #   ≥1.2N（约 +1.5σ，单次概率 ~20%）才能骗过
+                    #   "连续 2 次"判据。听着概率低，但要走 10~20 步，
+                    #   累积起来经常发生。
+                    #
+                    #   加确认次数只能降低概率，治不了根。真正的判据是
+                    #   **「停下来之后力还在不在」** —— 所以确认后再等
+                    #   settle_check 秒测一次，掉下去就继续闭合。
+                    if args.settle_check > 0:
+                        time.sleep(args.settle_check)
+                        f_chk, _, _ = measure(args.win_fine)
+                        f_chk -= f_base
+                        if f_chk < cur_target - args.settle_tol:
+                            print(f"   ⚠️ 复测 {f_chk:.2f}N < 目标 "
+                                  f"{cur_target:.2f}N（差 "
+                                  f"{cur_target-f_chk:.2f}N）—— 刚才那次是"
+                                  f"噪声尖峰，继续闭合")
+                            hit_count = 0
+                            prev_f = f_chk
+                            prev_pulse = pulse
+                            continue
+
+                    print(f"   ✅ 力达到目标 {cur_target:.2f}N"
+                          f"（连续 2 次，复测 {f_chk:.2f}N 确认），"
+                          f"停止闭合 —— 夹持力到位"
+                          if args.settle_check > 0 else
+                          f"   ✅ 力达到目标 {cur_target:.2f}N（连续 2 次），"
                           f"停止闭合 —— 夹持力到位")
                     converged = True
                     reached_force = True

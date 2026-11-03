@@ -84,7 +84,26 @@ _CN = {"grape": "葡萄", "egg": "鸡蛋", "pingpong": "乒乓球",
 # ---------------------------------------------------------------------------
 
 def grab_frame(args):
-    """抓一帧 BGR 图像。复用已验证可用的 K1Camera。"""
+    """
+    取一帧 BGR 图像。
+
+    ★ `--frame <路径>` 时直接读文件，不再调摄像头。
+      这是为了支持**流水线**：上层（product_mode）可以在做 ASR 的同时
+      就把照片拍好存到 /tmp，等 ASR 出来再调用本脚本并传入这张图。
+      拍照 1.0 s 就从关键路径上消失了（实测响应延迟 3.8 s → 2.8 s）。
+    """
+    import cv2
+
+    pre = getattr(args, "frame", None)
+    if pre:
+        if not os.path.exists(pre):
+            raise FileNotFoundError(f"--frame 指定的文件不存在：{pre}")
+        bgr = cv2.imread(pre)
+        if bgr is None:
+            raise ValueError(f"读不出图片：{pre}")
+        print(f"  ✅ 使用预拍摄的帧：{pre}")
+        return bgr
+
     from k1_camera_capture import K1Camera
 
     need_sudo = hasattr(os, "geteuid") and os.geteuid() != 0
@@ -290,6 +309,10 @@ def main() -> int:
     ap.add_argument("--min-conf", type=float, default=0.35,
                     help="置信度低于它判为 unknown（深色葡萄圆度天然低，"
                          "不要设太高）")
+    ap.add_argument("--frame", default=None,
+                    help="用这张已拍好的图代替实时拍照。"
+                         "用于流水线：上层在跑 ASR 时先把照片拍好，"
+                         "可以把 1.0 s 的拍照时间从关键路径上省掉")
     ap.add_argument("--no-execute", action="store_true",
                     help="只识别，不抓取")
     ap.add_argument("--save-debug", default=None,
