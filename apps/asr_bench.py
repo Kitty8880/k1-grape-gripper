@@ -84,12 +84,23 @@ STATUS_WORDS = ("状态", "怎么样", "好了吗", "进度")
 
 
 def clean(raw: str) -> str:
+    """
+    把识别结果规整成可比较的纯文本。
+
+    ⚠️ 2026-11-03 实测踩坑：SenseVoice 在某些配置下会把情感输出成
+       **emoji**（如「葡萄😔」），而不是 `<|SAD|>` 这种标签。
+       原实现只过滤标签，导致 20 次测试里有 13 次「葡萄😔」被误判为
+       识别错误 —— 句准确率显示 15%，实际是 80%。
+       **一个字符串清洗的疏漏，把成绩抹掉了一大半。**
+
+    现在改为「只保留中文字符和字母数字」，一次性解决：
+        emoji、标点、空格、标签残留、全角符号、零宽连接符
+    """
+    import re
     t = raw
     for tok in _STRIP_TOKENS:
         t = t.replace(tok, "")
-    for ch in "，。！？、,.!? \t\r\n「」\"'":
-        t = t.replace(ch, "")
-    return t
+    return re.sub(r"[^\u4e00-\u9fff\u3400-\u4dbfA-Za-z0-9]", "", t)
 
 
 def parse_intent(text: str) -> str:

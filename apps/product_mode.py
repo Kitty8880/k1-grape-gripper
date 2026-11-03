@@ -105,13 +105,20 @@ _STRIP_TOKENS = (
 
 
 def clean_text(raw: str) -> str:
-    """去掉 SenseVoice 输出的情感/事件标签和标点。"""
+    """
+    去掉 SenseVoice 输出的情感/事件标签、标点、以及 **emoji**。
+
+    ⚠️ 2026-11-03 实测：模型有时把情感输出成 emoji（「葡萄😔」）而不是
+       标签（`<|SAD|>`）。只过滤标签会让「葡萄😔」匹配不上关键词表，
+       但这里用的是 `in` 判断，所以「葡萄😔」其实仍能命中"葡萄"。
+       不过为了日志干净、也为了和 asr_bench 的判定口径一致，
+       统一按「只保留中文和字母数字」处理。
+    """
+    import re
     t = raw
     for tok in _STRIP_TOKENS:
         t = t.replace(tok, "")
-    for ch in "，。！？、,.!? \t\r\n":
-        t = t.replace(ch, "")
-    return t
+    return re.sub(r"[^\u4e00-\u9fff\u3400-\u4dbfA-Za-z0-9]", "", t)
 
 
 def parse_intent(raw: str) -> tuple[str, str]:
