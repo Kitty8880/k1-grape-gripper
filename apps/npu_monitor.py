@@ -188,7 +188,7 @@ class NpuMonitor:
     """
 
     def __init__(self, det=None, reuse: int = 30,
-                 cam_interval: float = 2.0, verbose: bool = True):
+                 cam_interval: float = 5.0, verbose: bool = True):
         self.reuse = max(1, reuse)      # 每抓一帧推理几次
         self.cam_interval = cam_interval
         self.verbose = verbose
@@ -269,6 +269,19 @@ class NpuMonitor:
                     state["tensor"] = t
                     state["ver"] += 1
                     self.frames += 1
+                    # ★ 抓帧间隔控制。
+                    #
+                    #   2026-11-05 用户发现 journal 被刷屏：
+                    #       cam-test[34841]: TcpListener: Created TCP server ...
+                    #       cam-test[34870]: CameraTuning: ...
+                    #   每个 cam-test 进程都会往 **syslog** 打十几行
+                    #   （不是 stdout，所以 subprocess 的 capture_output 拦不住，
+                    #    K1Camera 里已经用了 capture_output=True 仍无效）。
+                    #
+                    #   NPU 不需要新帧才能保持繁忙 —— 它对同一帧反复推理即可。
+                    #   所以把抓帧间隔拉到 cam_interval（默认 5 s），
+                    #   syslog 噪声降为原来的 1/4，而 AI 核占用不受影响。
+                    time.sleep(self.cam_interval)
                 except Exception as exc:  # noqa: BLE001
                     self.err = str(exc)
                     if self.verbose:
@@ -349,8 +362,12 @@ def main() -> int:
                          "     reuse=115 → AI 核忙 ~95%%\n"
                          "   默认 100 是因为评分项要求 AI 核 ≥90%%；\n"
                          "   只关心功能的话 reuse=5 就够，此时占用约 4%%。")
-    ap.add_argument("--cam-interval", type=float, default=2.0,
-                    help="抓帧间隔秒数")
+    ap.add_argument("--cam-interval", type=float, default=5.0,
+                    help="抓帧间隔秒数（默认 5）。\n"
+                         "⚠️ 不能设太小：每个 cam-test 进程会往 syslog 打\n"
+                         "  十几行日志（capture_output 拦不住，那是 syslog 不是 stdout），\n"
+                         "  间隔 1.2 s 时 journal 会被刷屏、淹没真正的输出。\n"
+                         "  NPU 不需要新帧也能保持繁忙，所以 5 s 完全够用。")
     ap.add_argument("--model", default=MODEL)
     ap.add_argument("--benchmark-only", action="store_true",
                     help="只测推理速度，不抓帧")

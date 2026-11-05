@@ -651,13 +651,15 @@ def main() -> int:
                          "只招一次容易错过。收到指令后自动停止")
     ap.add_argument("--ready-gap", type=float, default=15.0,
                     help="重复招手之间的间隔秒数（默认 15）")
-    ap.add_argument("--npu", action="store_true", default=False,
-                    help="启动 NPU 人手安全监控（默认关闭）。\n"
-                         "⚠️ 2026-11-05 改为默认关闭：它持续占 4 个线程\n"
-                         "  推理，会抢走串口读取线程的 CPU，导致\n"
-                         "  PS01 力读数样本变少、中值滤波失效、\n"
-                         "  屏幕上的力值上下跳（实测反馈）。\n"
-                         "  需要展示 AI 核占用时再手动加 --npu"
+    ap.add_argument("--npu", action="store_true", default=True,
+                    help="启动 NPU 人手安全监控（默认开启）。\n"
+                         "⭐ 2026-11-05 做过受控 A/B 实测\n"
+                         "  （scripts/npu_jitter_ab.py，各 10 秒）：\n"
+                         "    σ稳健 418 → 383 counts（无干扰）\n"
+                         "    采样率 477 → 371 Hz（仍远高于传感器\n"
+                         "    160 Hz 输出，不丢样本）\n"
+                         "  所以之前「NPU 让力读数变抖」的推断是**错的**。\n"
+                         "  开启后 AI 核占用 91%，抓取时自动暂停让出摄像头。"
                          "它让 AI 核持续工作，实测占用 91%；\n"
                          "抓取时自动暂停，避免和 vision_grasp 抢摄像头")
     ap.add_argument("--no-npu", dest="npu", action="store_false",
@@ -696,6 +698,23 @@ def main() -> int:
         import threading
 
         def _force_exit():
+            # ★ 先停掉 NPU 监控，再退出。
+            #
+            #   2026-11-05 实测：直接退出会 SIGABRT ——
+            #     "Main process exited, code=dumped, status=6/ABRT"
+            #     "Failed with result 'core-dump'"
+            #   原因：推理线程正卡在 session.run() 里，
+            #   SpaceMIT 的 ExecutionProvider 在进程拆解时断言失败。
+            #
+            #   所以先置 paused（让线程不再发起新的推理），
+            #   等一次在途推理跑完（最长约 25 ms，这里留 0.6 s 余量），
+            #   再强退。
+            try:
+                if runner.mon is not None:
+                    runner.mon.paused = True
+                    time.sleep(0.6)
+            except Exception:  # noqa: BLE001
+                pass
             # 2 秒内没自己退就强退。2 秒足够让 record_audio 走完一轮。
             time.sleep(2.0)
             print("强制退出", flush=True)
