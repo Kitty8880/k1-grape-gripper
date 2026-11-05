@@ -651,8 +651,13 @@ def main() -> int:
                          "只招一次容易错过。收到指令后自动停止")
     ap.add_argument("--ready-gap", type=float, default=15.0,
                     help="重复招手之间的间隔秒数（默认 15）")
-    ap.add_argument("--npu", action="store_true", default=True,
-                    help="启动 NPU 人手安全监控（默认开启）。\n"
+    ap.add_argument("--npu", action="store_true", default=False,
+                    help="启动 NPU 人手安全监控（默认关闭）。\n"
+                         "⚠️ 2026-11-05 改为默认关闭：它持续占 4 个线程\n"
+                         "  推理，会抢走串口读取线程的 CPU，导致\n"
+                         "  PS01 力读数样本变少、中值滤波失效、\n"
+                         "  屏幕上的力值上下跳（实测反馈）。\n"
+                         "  需要展示 AI 核占用时再手动加 --npu"
                          "它让 AI 核持续工作，实测占用 91%；\n"
                          "抓取时自动暂停，避免和 vision_grasp 抢摄像头")
     ap.add_argument("--no-npu", dest="npu", action="store_false",
@@ -668,8 +673,35 @@ def main() -> int:
     runner = ProductRunner(args)
 
     def _sig(_signum, _frame):
+        """
+        SIGTERM / SIGINT 处理。
+
+        ⚠️ 只设标志是不够的：主循环里大多数时间阻塞在
+        `rec.record_audio()`（等 VAD 判定语音结束），
+        这个调用可以阻塞几十秒甚至更久。实测：
+            systemd 发 SIGTERM → 90 秒后仍没退出
+            → "State 'stop-sigterm' timed out. Killing."
+            → 服务被 SIGKILL 并标记 failed
+        后果是 `systemctl stop` 之后服务处于 failed 状态，
+        下次 `is-active` 检查会误判，演示时很难看。
+
+        所以这里做两件事：
+          1. 设标志，让已经在循环里的代码尽快退
+          2. 给一个短暂的体面退出窗口，然后**强制退出**
+             （os._exit 不跑 atexit/finally，但这里没有需要
+                flush 的关键状态；音频流由内核回收）
+        """
         runner._stop = True
-        print("\n收到退出信号 ...", flush=True)
+        print("\n收到退出信号，正在停止 ...", flush=True)
+        import threading
+
+        def _force_exit():
+            # 2 秒内没自己退就强退。2 秒足够让 record_audio 走完一轮。
+            time.sleep(2.0)
+            print("强制退出", flush=True)
+            os._exit(0)
+
+        threading.Thread(target=_force_exit, daemon=True).start()
 
     signal.signal(signal.SIGTERM, _sig)
     signal.signal(signal.SIGINT, _sig)

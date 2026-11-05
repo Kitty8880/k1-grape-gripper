@@ -163,10 +163,21 @@ def main() -> int:
                     help="滑移重试时夹持位置收紧多少微秒（脉宽减小=更紧）")
     ap.add_argument("--auto-lift", action="store_true",
                     help="不等待手动确认（自动流程用）")
-    ap.add_argument("--settle-check", type=float, default=0.8,
-                    help="达到目标后等多少秒再复测一次（默认 0.8）。"
+    ap.add_argument("--settle-check", type=float, default=0.0,
+                    help="达到目标后等多少秒再复测一次（默认 0 = 关闭）。\n"
+                         "⚠️ 2026-11-05 回退为默认关闭：\n"
+                         "  复测本身能排除噪声尖峰导致的提前停止，\n"
+                         "  但会多一次测力、多一轮判断，在传感器噪声\n"
+                         "  偏大的机器上反而让行为变得难以预测。\n"
+                         "  验证过 100% 抓取率（10/10）的配置是关闭状态。\n"
+                         "  需要时用手动开：--settle-check 0.8"
                          "复测力低于目标就继续闭合 —— 用来排除"
                          "「噪声尖峰导致提前停止」。设 0 关闭")
+    ap.add_argument("--settle-retries", type=int, default=2,
+                    help="复测最多可否决几次（默认 2）。\n"
+                         "⚠️ 必须有上限：没有上限时会因为力在目标附近抖动，\n"
+                         "被判为「噪声」而无限继续闭合，表现就是\n"
+                         "「已经夹牢了却一直用力」（实测踩过）")
     ap.add_argument("--settle-tol", type=float, default=0.10,
                     help="复测允许的低于目标的容差（默认 0.10N），"
                          "低于 目标-容差 才判为噪声尖峰")
@@ -437,6 +448,10 @@ def main() -> int:
             cur_step = args.probe_step_fast
             force_hist = []        # 最近几拍的力，用于判断"平台期/舵机堵转"
             stall_count = 0        # 连续多少次测力"数值完全不变"→ 数据流断裂
+            # 复测否决过几次。**必须有上限**：没有上限时，力在目标附近
+            # 抖动会被反复判成"噪声尖峰"，表现就是「已经夹牢了却一直用力」
+            # （2026-11-03 用户实测踩到）。
+            settle_rejects = 0
             while pulse > deepest:
                 # ★ 自适应步长：按观察到的"力对位置的梯度"决定走多大一步
                 #
@@ -603,15 +618,34 @@ def main() -> int:
                         time.sleep(args.settle_check)
                         f_chk, _, _ = measure(args.win_fine)
                         f_chk -= f_base
-                        if f_chk < cur_target - args.settle_tol:
+                        # ⚠️ 否决次数必须有上限，否则会一路夹到底
+                        #
+                        #   2026-11-03 用户实测：加了复测之后"一直用力，
+                        #   即使夹牢了也不停"。
+                        #   原因：复测只要发现力低于 目标−容差 就 continue
+                        #   继续闭合，但没有限制能否决几次。当真实力就停在
+                        #   1.10~1.15N（目标 1.20、容差 0.10）附近时，
+                        #   每次复测都判"刚才是噪声"，于是无限闭合。
+                        #
+                        #   正确做法：允许否决 settle_retries 次（默认 2），
+                        #   之后必须接受 —— 因为那时候已经可以确定
+                        #   "这就是这个物体能给到的力"，而不是噪声。
+                        if (f_chk < cur_target - args.settle_tol
+                                and settle_rejects < args.settle_retries):
+                            settle_rejects += 1
                             print(f"   ⚠️ 复测 {f_chk:.2f}N < 目标 "
                                   f"{cur_target:.2f}N（差 "
-                                  f"{cur_target-f_chk:.2f}N）—— 刚才那次是"
-                                  f"噪声尖峰，继续闭合")
+                                  f"{cur_target-f_chk:.2f}N）—— 判为噪声尖峰，"
+                                  f"继续闭合"
+                                  f"（第 {settle_rejects}/{args.settle_retries} 次否决）")
                             hit_count = 0
                             prev_f = f_chk
                             prev_pulse = pulse
                             continue
+                        if f_chk < cur_target - args.settle_tol:
+                            print(f"   ⚠️ 复测 {f_chk:.2f}N 仍低于目标，"
+                                  f"但已否决 {settle_rejects} 次 —— "
+                                  f"不再继续，判定为「该物体能给到的力」")
 
                     print(f"   ✅ 力达到目标 {cur_target:.2f}N"
                           f"（连续 2 次，复测 {f_chk:.2f}N 确认），"
