@@ -651,8 +651,13 @@ def main() -> int:
                          "只招一次容易错过。收到指令后自动停止")
     ap.add_argument("--ready-gap", type=float, default=15.0,
                     help="重复招手之间的间隔秒数（默认 15）")
-    ap.add_argument("--npu", action="store_true", default=True,
-                    help="启动 NPU 人手安全监控（默认开启）。\n"
+    ap.add_argument("--npu", action="store_true", default=False,
+                    help="启动 NPU 人手安全监控（默认关闭）。\n"
+                         "⭐ 2026-11-05 因散热事故改为默认关闭：\n"
+                         "  开启后 AI 核持续 91%，空闲温度从 ~50°C\n"
+                         "  升到 ~64°C（本机无散热片）。\n"
+                         "  演示时手动加 --npu 即可展示，文档里已记录\n"
+                         "  实测占用 91%（监控期间）/ 约 65%（完整任务）。\n"
                          "⭐ 2026-11-05 做过受控 A/B 实测\n"
                          "  （scripts/npu_jitter_ab.py，各 10 秒）：\n"
                          "    σ稳健 418 → 383 counts（无干扰）\n"
