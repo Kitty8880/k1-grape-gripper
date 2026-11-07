@@ -247,11 +247,11 @@ sudo python3 apps/servo_step_test.py --floor 750 --step 20
 ### 运行
 
 ```bash
-# ★ 主路径：常听模式 + 具身流程（实时监控 + 双模判定 + A→B）
+# ★ 主路径：常听模式 + 具身闭环（实时监控 + 双模判定 + A→B）
 #   ⚠️ 首次使用先学一次 B 点（见下一节），否则 A→B 会退回"位移判定"
-sudo python3 apps/product_mode.py --embodied
+sudo python3 apps/product_mode.py
 
-# 具身流程单独跑（命令行，不接语音）
+# 具身闭环单独跑（命令行，不接语音）
 #   ① 学 B 点：把葡萄放到目标位置后运行，按回车记录
 sudo python3 apps/embodied_grasp.py --learn-b --b-tol 80
 #   ② 正式跑（网页预览 http://<板子IP>:8082/）
@@ -260,8 +260,8 @@ sudo python3 apps/embodied_grasp.py --target 1.0 --b-tol 80 --max-seconds 60
 #     ssh -N -L 8082:127.0.0.1:8082 daiweikai@<板子IP>
 #     浏览器打开 http://127.0.0.1:8082/
 
-# 回退路径：常听模式 + 单帧快照流程（逻辑更简单，已验证 10/10）
-sudo python3 apps/product_mode.py --echo
+# 回退路径：常听模式 + 旧的单帧快照流程（逻辑更简单，已验证 10/10）
+sudo python3 apps/product_mode.py --legacy
 
 # 菜单式（推荐第一次上手先跑这个）
 chmod +x run_demo.sh && ./run_demo.sh

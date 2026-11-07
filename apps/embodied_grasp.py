@@ -1006,6 +1006,30 @@ class EmbodiedGrasp:
                            " 连续 %d 拍 → 传感器与视觉边缘一致"
                            % (self.max_force, CONTACT_N, self.max_rise,
                               FLAT_RISE, self.contact_hits))
+                return self.state
+
+            # ★ 2026-11-07 新增：在"闭合中"阶段就直接判"到达 B"
+            #
+            #   实测问题（用户提供的数据）：
+            #     · 力锁在 1.00N，只到 824µs，压得轻
+            #     · 扁平度最大涨幅 +0.013，**差 0.002 没过 0.015**
+            #     · 于是状态一直卡在"闭合中"，判不出"接触到"
+            #     · 而代码里 A→B 只在"夹到了"分支里，
+            #       所以用户已经把葡萄搬到 B 点（距 19px）并停稳 10 多拍，
+            #       系统却一次都没判成功
+            #
+            #   这是**串行状态机的结构缺陷**：一个临界的中间判断
+            #   把最终的成功判断堵死了。
+            #
+            #   修法：只要"力确实在夹着（峰值 ≥ HOLD_N）、葡萄可见、
+            #   到达 B 点且停稳"，就直接判成功 —— 这些证据已经足够，
+            #   扁平度差 0.002 不该否定它。
+            if (self.max_force is not None and self.max_force >= HOLD_N
+                    and force >= GRASP_N and vision_ok):
+                if self._judge_arrival(force):
+                    return self.state
+            else:
+                self.moved_hits = 0
             return self.state
 
         if self.state == S_TOUCHED:
@@ -1030,6 +1054,40 @@ class EmbodiedGrasp:
             return self.state
 
         return self.state
+
+    # ------------------------------------------------------------ 停稳判定
+    #
+    def _judge_arrival(self, force: float) -> bool:
+        """
+        判"是否已到达 B 点"。达到判定条件时返回 True（并已产生状态事件）。
+
+        ★ 2026-11-07 抽出成独立方法，原因：
+          原来这段逻辑只写在"夹到了"分支里，导致状态一旦卡在"闭合中"
+          （例如扁平度涨幅差 0.002 没触发"接触到"），
+          用户就算把葡萄搬到 B 点并停稳，也永远判不出来。
+          抽出来之后，"闭合中"和"夹到了"两条路径都能用同一套判据。
+        """
+        if self.b_target is None or self.center is None:
+            return False
+        fw, fh = self.frame_size
+        bx = float(self.b_target["x_norm"]) * fw
+        by = float(self.b_target["y_norm"]) * fh
+        tol = float(self.b_target.get("tol_px", B_TOL_PX))
+        db = ((self.center[0] - bx) ** 2
+              + (self.center[1] - by) ** 2) ** 0.5
+        self.dist_b = db
+        if db <= tol and self._is_still():
+            self.moved_hits += 1
+        else:
+            self.moved_hits = 0
+        if self.moved_hits >= MOVED_CONFIRM:
+            self._emit(S_MOVED,
+                       "距 B 点 %.0fpx ≤ 容差 %.0fpx，且已停稳 %d 拍；"
+                       "力 %.2fN，葡萄可见 → 已移到B（力与位置证据充分，"
+                       "不要求先判出「接触到」）"
+                       % (db, tol, self.moved_hits, force))
+            return True
+        return False
 
     # ------------------------------------------------------------ 停稳判定
     #

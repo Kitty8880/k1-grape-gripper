@@ -434,8 +434,9 @@ class ProductRunner:
         if self.mon is not None:
             self.mon.pause()
 
-        # ── 选流程：具身（新）还是旧路径 ──
-        if getattr(self.args, "embodied", False):
+        # ── 选流程：具身（默认）还是旧的单帧快照 ──
+        use_legacy = getattr(self.args, "legacy", False)
+        if not use_legacy:
             # 具身流程：实时视觉监控 + 视觉/力双模 + A→B 判定
             #
             # ⚠️ 注意：embodied_grasp 自己开连续视频流，
@@ -474,7 +475,7 @@ class ProductRunner:
             self._gesture("done")
         else:
             print(f"  ⚠️ 抓取未成功（退出码 {rc}），继续待命", flush=True)
-            if not getattr(self.args, "embodied", False):
+            if use_legacy:
                 print(f"     调试图在 {dbg}/ （last_raw.jpg / last_mask.png）",
                       flush=True)
             self._gesture("fail")
@@ -702,24 +703,21 @@ def main() -> int:
                          "这是唯一能让人看出「已经就绪」的信号")
     ap.add_argument("--echo", action="store_true",
                     help="打印识别到的每一句话（调识别率时用）")
-    # ---------------- 具身流程开关（2026-11-07 新增）----------------
+    # ---------------- 流程选择（2026-11-07 调整默认值）----------------
     #
-    # 为什么需要这个开关
-    # ------------------
     # 赛题要求"实现多模态协同（至少选择 CV, ASR, LLM 中的两种）"。
     # 我们的 CV 和 ASR 各自都验证过，但**必须协同**（同一流程里）。
     #
-    # 旧流程（vision_grasp.py）就是 ASR → CV → 抓取，多模态协同成立，
-    # 但它没有"实时视觉监控夹持过程"和"A→B 判定"。
-    # 新流程（embodied_grasp.py）有具身能力，但**只有 CV、没有 ASR**，
-    # 单独交付会被认为不满足"两种模态"。
+    # 具身流程（embodied_grasp.py）= ASR + CV 实时监控 + 力视觉双模 + A→B，
+    # 是项目的主路径，所以**现在默认就走它**。
     #
-    # 所以加这个开关：
-    #   不加  → 走 vision_grasp.py（已验证 10/10 的旧路径，随时可切回）
-    #   加了  → 走 embodied_grasp.py（具身流程：实时监控 + 力视觉结合 + A→B）
+    # 旧流程（vision_grasp.py）是单帧快照 + 力控到目标即停，逻辑更简单、
+    # 已验证 10/10，保留作为 `--legacy` 回退选项。
+    ap.add_argument("--legacy", action="store_true",
+                    help="改用旧的单帧快照流程（vision_grasp.py）。"
+                         "默认走具身流程（embodied_grasp.py）")
     ap.add_argument("--embodied", action="store_true",
-                    help="用具身流程抓取（embodied_grasp.py）："
-                         "实时视觉监控 + 视觉/力双模判夹到 + A→B 判定")
+                    help="（已无作用，保留兼容）默认就是具身流程")
     ap.add_argument("--embodied-target", type=float, default=1.0,
                     help="具身流程的目标力(N)，默认 1.0")
     ap.add_argument("--embodied-tol", type=float, default=80.0,
