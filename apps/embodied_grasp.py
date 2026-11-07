@@ -111,7 +111,11 @@ BASELINE_FAIL_TICKS = 60   # 60 拍（约 6 秒）还采不到 → 判失败并�
 AIR_CONFIRM = 4         # 力到目标但扁平度一直没上升 → 判"夹空"
 DROP_CONFIRM = 5        # 已夹住后视觉连续几拍丢失 → 判"脱落"
 SOLID_OK = 0.85         # 实心度低于此值 → 轮廓被切碎，视觉不可信
-SLIP_WIDTH_PX = 25.0    # 可见宽度比夹住时变大超过此值 → 判"滑移"
+SLIP_WIDTH_PX = 60.0    # 可见宽度比夹住时变大超过此值 → 判"滑移"
+                        # ★ 2026-11-07 从 25 提到 60：
+                        #   实测两次误报都是 +30~32px（葡萄被往摄像头方向移，
+                        #   近大远小导致画面变大），25 太敏感。
+                        #   真正的滑移（葡萄往外挤）变化会大得多。
 #: A→B 判定：质心位移超过此像素数。
 #: ★ 2026-11-06 修正：原来是 60px，换算下来只有约 6 mm
 #:   （葡萄直径 22mm → 画面 220px → 10px/mm），
@@ -1099,8 +1103,9 @@ def main() -> int:
                     help="预学 B 点：把葡萄放在目标位置后运行，按回车记录")
     ap.add_argument("--b-file", default=None,
                     help="B 点文件路径（默认项目根目录 b_target.json）")
-    ap.add_argument("--b-tol", type=float, default=B_TOL_PX,
-                    help="到 B 点的容差（像素，默认 %.0f）" % B_TOL_PX)
+    ap.add_argument("--b-tol", type=float, default=None,
+                    help="到 B 点的容差（像素）。不给就用 B 点文件里存的值，"
+                         "再没有就用 %.0f" % B_TOL_PX)
     args = ap.parse_args()
 
     cfg = Config.load(default_config_path())
@@ -1123,6 +1128,14 @@ def main() -> int:
     print("  「夹到了」= 力 ≥ %.2fN  AND  扁平度最大涨幅 ≥ %+.3f  （连续 %d 拍）"
           % (HOLD_N, FLAT_RISE, GRASP_CONFIRM))
     _b_now = load_b_target(args.b_file)
+    # ★ 命令行 --b-tol 优先于文件里存的值
+    #   （2026-11-07 修 bug：以前优先读文件，`--b-tol 80` 被静默忽略，
+    #     日志里显示的还是文件中的 50，用户以为参数没生效）
+    if _b_now is not None:
+        if args.b_tol is not None:
+            _b_now["tol_px"] = float(args.b_tol)
+        elif "tol_px" not in _b_now:
+            _b_now["tol_px"] = float(B_TOL_PX)
     if _b_now:
         print("  「已移到B」= 距 B 点 ≤ %.0fpx AND 已停稳 AND 力 ≥ %.2fN"
               " AND 扁平度涨幅仍 ≥ %+.3f"
@@ -1244,12 +1257,13 @@ def main() -> int:
         m = (v or {}).get("metrics") or {}
         c = m.get("centroid") or c
         H, W = 1080, 1920
-        p = save_b_target(c[0] / W, c[1] / H, (W, H), args.b_tol,
+        _tol_save = float(args.b_tol) if args.b_tol is not None else B_TOL_PX
+        p = save_b_target(c[0] / W, c[1] / H, (W, H), _tol_save,
                           args.b_file)
         print("\n   ✅ 已记录 B 点：")
         print("      质心像素 (%.0f, %.0f)  =  画面比例 (%.4f, %.4f)"
               % (c[0], c[1], c[0] / W, c[1] / H))
-        print("      容差 ±%.0fpx" % args.b_tol)
+        print("      容差 ±%.0fpx" % _tol_save)
         print("      已保存到 %s" % p)
         print("\n   以后直接运行（不带 --learn-b）就会判「是否真的到了 B」")
         if preview is not None:
@@ -1325,7 +1339,7 @@ def main() -> int:
     # ---------------- 主循环 ----------------
     machine = EmbodiedGrasp(vision, dry_run=args.dry_run,
                             verbose=args.verbose, target_force=target,
-                            b_target=load_b_target(args.b_file),
+                            b_target=_b_now,
                             frame_size=(1920, 1080))
     # ★ 采基线阶段必须**全开**：基线要的是"葡萄完全没被压"时的扁平度。
     #   如果一上来就预闭合到 approach（940µs），两指可能已经贴到葡萄，

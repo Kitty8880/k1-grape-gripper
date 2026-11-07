@@ -427,23 +427,42 @@ class ProductRunner:
 
     def do_grasp(self, frame: str | None = None) -> None:
         print(f"\n▶ 第 {self.runs + 1} 次抓取", flush=True)
-        script = os.path.join(_HERE, "vision_grasp.py")
-        # ⚠️ 不要给 vision_grasp.py 传 --grasp-arg！
-        #    它是 action="append"，argparse 会把后面的 --min-force 当成选项，
-        #    报 "argument --grasp-arg: expected one argument"（踩过这个坑）。
-        #    vision_grasp.py 内部已经给 grasp_with_verify.py 加了
-        #    --min-force 1.2，不需要外部再传。
-        #
-        # ★ 每次都存调试图（原件/标注/掩码），识别失败时能直接看图定位。
+
         dbg = os.path.join(_ROOT, "debug")
         # ★ 抓取期间让出摄像头：cam-test 是独占的，
-        #   监控和 vision_grasp 同时用会互相抢（实测抓帧失败）。
+        #   监控和抓取脚本同时用会互相抢（实测抓帧失败）。
         if self.mon is not None:
             self.mon.pause()
-        argv = [script, "--expect", "grape", "--save-debug", dbg]
-        # ★ 传入并行拍好的帧，省掉内部 1.0 s 的拍照
-        if frame:
-            argv.extend(["--frame", frame])
+
+        # ── 选流程：具身（新）还是旧路径 ──
+        if getattr(self.args, "embodied", False):
+            # 具身流程：实时视觉监控 + 视觉/力双模 + A→B 判定
+            #
+            # ⚠️ 注意：embodied_grasp 自己开连续视频流，
+            #    不接受外部帧（--frame），所以忽略 frame 参数。
+            # ⚠️ B 点必须先学（b_target.json），否则会退回"位移判定"。
+            script = os.path.join(_HERE, "embodied_grasp.py")
+            argv = [script,
+                    "--target", str(self.args.embodied_target),
+                    "--b-tol", str(self.args.embodied_tol),
+                    "--max-seconds", str(self.args.embodied_max_seconds),
+                    # 产品模式没有屏幕看网页，但保留预览不影响运行；
+                    # 若想省资源可改成 "--no-preview"
+                    ]
+            print("      流程：具身（实时监控 + 双模判定 + A→B）",
+                  flush=True)
+        else:
+            script = os.path.join(_HERE, "vision_grasp.py")
+            # ⚠️ 不要给 vision_grasp.py 传 --grasp-arg！
+            #    它是 action="append"，argparse 会把后面的 --min-force 当成选项，
+            #    报 "argument --grasp-arg: expected one argument"（踩过这个坑）。
+            #    vision_grasp.py 内部已经给 grasp_with_verify.py 加了
+            #    --min-force 1.2，不需要外部再传。
+            argv = [script, "--expect", "grape", "--save-debug", dbg]
+            # ★ 传入并行拍好的帧，省掉内部 1.0 s 的拍照
+            if frame:
+                argv.extend(["--frame", frame])
+
         try:
             rc = self._run(argv)
         finally:
@@ -455,8 +474,9 @@ class ProductRunner:
             self._gesture("done")
         else:
             print(f"  ⚠️ 抓取未成功（退出码 {rc}），继续待命", flush=True)
-            print(f"     调试图在 {dbg}/ （last_raw.jpg / last_mask.png）",
-                  flush=True)
+            if not getattr(self.args, "embodied", False):
+                print(f"     调试图在 {dbg}/ （last_raw.jpg / last_mask.png）",
+                      flush=True)
             self._gesture("fail")
 
     def _ready_beacon(self, times: int, gap: float) -> None:
@@ -621,12 +641,19 @@ def main() -> int:
                          "降到 0.08 更灵敏；若出现「每几秒空录一次」，"
                          "说明底噪偏大，改回 0.12 并提高 speak 音量")
     ap.add_argument("--trig-off", type=float, default=0.30)
-    ap.add_argument("--silence", type=float, default=1.5,
-                    help="静音多少秒算一句话结束。越长越不会截断，"
-                         "但每轮延迟越大")
-    ap.add_argument("--max-time", type=int, default=3,
-                    help="单句最长秒数。误触发时要白等这么久，"
-                         "所以不要设太大；但也不能小于一句话的长度")
+    ap.add_argument("--silence", type=float, default=0.9,
+                    help="静音多少秒算一句话结束。\n"
+                         "⚠️ 2026-11-07 从 1.5 降到 0.9：\n"
+                         "  响应延迟按 ≤1s/≤2s/≤3s/≤4s 分档，\n"
+                         "  端到端 = 静音判定 + ASR推理(RTF≈0.77×音频时长)。\n"
+                         "  1.5s 时实测约 4.4s，只够 4 分档；\n"
+                         "  0.9s 后约 2.5~3s，可进 6 分档甚至 12 分档。\n"
+                         "  风险：句中停顿超 0.9s 会截断。指令很短，实测未截断；\n"
+                         "  若出现截断，改回 --silence 1.2")
+    ap.add_argument("--max-time", type=int, default=2,
+                    help="单句最长秒数。\n"
+                         "⚠️ 2026-11-07 从 3 降到 2，同样为了压延迟；\n"
+                         "  误触发时白等的时间也缩短。指令都很短，2 秒够用")
     ap.add_argument("--dry-run", action="store_true",
                     help="不驱动硬件，只走识别和意图判断")
     ap.add_argument("--parallel", action="store_true",
@@ -675,6 +702,30 @@ def main() -> int:
                          "这是唯一能让人看出「已经就绪」的信号")
     ap.add_argument("--echo", action="store_true",
                     help="打印识别到的每一句话（调识别率时用）")
+    # ---------------- 具身流程开关（2026-11-07 新增）----------------
+    #
+    # 为什么需要这个开关
+    # ------------------
+    # 赛题要求"实现多模态协同（至少选择 CV, ASR, LLM 中的两种）"。
+    # 我们的 CV 和 ASR 各自都验证过，但**必须协同**（同一流程里）。
+    #
+    # 旧流程（vision_grasp.py）就是 ASR → CV → 抓取，多模态协同成立，
+    # 但它没有"实时视觉监控夹持过程"和"A→B 判定"。
+    # 新流程（embodied_grasp.py）有具身能力，但**只有 CV、没有 ASR**，
+    # 单独交付会被认为不满足"两种模态"。
+    #
+    # 所以加这个开关：
+    #   不加  → 走 vision_grasp.py（已验证 10/10 的旧路径，随时可切回）
+    #   加了  → 走 embodied_grasp.py（具身流程：实时监控 + 力视觉结合 + A→B）
+    ap.add_argument("--embodied", action="store_true",
+                    help="用具身流程抓取（embodied_grasp.py）："
+                         "实时视觉监控 + 视觉/力双模判夹到 + A→B 判定")
+    ap.add_argument("--embodied-target", type=float, default=1.0,
+                    help="具身流程的目标力(N)，默认 1.0")
+    ap.add_argument("--embodied-tol", type=float, default=80.0,
+                    help="具身流程到 B 点的容差(px)，默认 80")
+    ap.add_argument("--embodied-max-seconds", type=float, default=60.0,
+                    help="具身流程单次时长上限(秒)，默认 60")
     args = ap.parse_args()
 
     runner = ProductRunner(args)
