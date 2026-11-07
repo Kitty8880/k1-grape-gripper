@@ -100,22 +100,42 @@ def add_page_number_footer(section):
 
 
 def add_toc(doc):
-    """插入 Word 目录域（打开后按 F9 或右键更新即可生成）。"""
+    """
+    插入 Word 目录域。
+
+    ⚠️ 关键点（2026-11-07 踩坑）：
+      ① 域的五个组成部分必须**分放在独立的 run 里**，
+         全部塞进同一个 run 时 Word 识别不出这是目录域；
+      ② 必须把域标记为 dirty（`w:dirty="true"`），
+         否则 Word 打开时不会自动更新，只显示占位文字 ——
+         用户看到的是一行"请按 F9"，等于没做目录。
+      ③ 占位文字只作为兜底；真正的页码由 updater 用 Word 自动生成。
+    """
     p = doc.add_paragraph()
-    run = p.add_run()
-    begin = OxmlElement("w:fldChar")
-    begin.set(qn("w:fldCharType"), "begin")
+
+    def _fld(kind):
+        r = p.add_run()
+        el = OxmlElement("w:fldChar")
+        el.set(qn("w:fldCharType"), kind)
+        if kind == "begin":
+            el.set(qn("w:dirty"), "true")
+        r._r.append(el)
+        return r
+
+    _fld("begin")
+
+    r = p.add_run()
     instr = OxmlElement("w:instrText")
     instr.set(qn("xml:space"), "preserve")
-    instr.text = r' TOC \o "1-3" \h \z \u '
-    sep = OxmlElement("w:fldChar")
-    sep.set(qn("w:fldCharType"), "separate")
-    text = OxmlElement("w:t")
-    text.text = "（打开后按 Ctrl+A 再按 F9 更新目录）"
-    end = OxmlElement("w:fldChar")
-    end.set(qn("w:fldCharType"), "end")
-    for el in (begin, instr, sep, text, end):
-        run._r.append(el)
+    instr.text = r' TOC \o "1-2" \h \z \u '
+    r._r.append(instr)
+
+    _fld("separate")
+
+    r = p.add_run("目录生成中……")
+    set_run_font(r, size=10.5, color=C_MUTED)
+
+    _fld("end")
 
 
 # ---------------------------------------------------------------- 预处理
