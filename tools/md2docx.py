@@ -33,6 +33,14 @@ C_ACCENT = RGBColor(0xC0, 0x39, 0x2B)    # 强调红
 C_MUTED = RGBColor(0x60, 0x60, 0x60)     # 灰
 C_CODE = RGBColor(0x24, 0x29, 0x2E)
 
+#: 简约模式（--simple）用的配色：全黑白灰，不描色
+S_HEAD = RGBColor(0x00, 0x00, 0x00)
+S_BODY = RGBColor(0x1A, 0x1A, 0x1A)
+S_MUTED = RGBColor(0x59, 0x59, 0x59)
+S_TBL_HEAD_FILL = "EDEDED"
+S_CODE_FILL = "F7F7F7"
+S_RULE = "999999"
+
 
 def set_run_font(run, name=BODY_FONT, ea=BODY_EA, size=None,
                  bold=None, color=None):
@@ -220,7 +228,16 @@ def add_inline(paragraph, text, size=10.5, base_color=None):
 
 
 # ---------------------------------------------------------------- 主转换
-def convert(md_path: Path, docx_path: Path, title: str, subtitle: str):
+def convert(md_path: Path, docx_path: Path, title: str, subtitle: str,
+            simple: bool = False):
+    # 简约模式：全黑白灰，不描色（用户要求"画风简单一点"）
+    HEAD = S_HEAD if simple else C_HEAD
+    ACCENT = S_HEAD if simple else C_ACCENT
+    RULE = S_RULE if simple else "1F3A5F"
+    TBL_FILL = S_TBL_HEAD_FILL if simple else "1F3A5F"
+    TBL_TXT = RGBColor(0x00, 0x00, 0x00) if simple else RGBColor(0xFF, 0xFF, 0xFF)
+    CODE_FILL = S_CODE_FILL if simple else "F5F6F7"
+    QUOTE_RULE = "808080" if simple else "C0392B"
     lines = md_path.read_text(encoding="utf-8").splitlines()
     lines = normalize(lines)
 
@@ -255,7 +272,7 @@ def convert(md_path: Path, docx_path: Path, title: str, subtitle: str):
     tlen = len(title)
     tsize = 30 if tlen <= 12 else (26 if tlen <= 16 else 22)
     set_run_font(r, name=HEAD_FONT, ea=HEAD_FONT, size=tsize, bold=True,
-                 color=C_HEAD)
+                 color=HEAD)
 
     if subtitle:
         p = doc.add_paragraph()
@@ -283,7 +300,7 @@ def convert(md_path: Path, docx_path: Path, title: str, subtitle: str):
     p = doc.add_paragraph()
     r = p.add_run("目  录")
     set_run_font(r, name=HEAD_FONT, ea=HEAD_FONT, size=18, bold=True,
-                 color=C_HEAD)
+                 color=HEAD)
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     add_toc(doc)
     doc.add_page_break()
@@ -308,7 +325,7 @@ def convert(md_path: Path, docx_path: Path, title: str, subtitle: str):
             pf.space_before = Pt(0)
             pf.space_after = Pt(0)
             pf.line_spacing = 1.1
-            para_shade(p, "F5F6F7")
+            para_shade(p, CODE_FILL)
             r = p.add_run(ln if ln else " ")
             set_run_font(r, name=CODE_FONT, ea=CODE_FONT, size=9,
                          color=C_CODE)
@@ -358,7 +375,7 @@ def convert(md_path: Path, docx_path: Path, title: str, subtitle: str):
                 h = doc.add_heading(level=1)
                 r = h.add_run(text)
                 set_run_font(r, name=HEAD_FONT, ea=HEAD_FONT, size=20,
-                             bold=True, color=C_HEAD)
+                             bold=True, color=HEAD)
                 h.alignment = WD_ALIGN_PARAGRAPH.CENTER
                 h.paragraph_format.space_before = Pt(6)
                 h.paragraph_format.space_after = Pt(14)
@@ -366,7 +383,7 @@ def convert(md_path: Path, docx_path: Path, title: str, subtitle: str):
                 h = doc.add_heading(level=2)
                 r = h.add_run(text)
                 set_run_font(r, name=HEAD_FONT, ea=HEAD_FONT, size=15.5,
-                             bold=True, color=C_HEAD)
+                             bold=True, color=HEAD)
                 h.paragraph_format.space_before = Pt(16)
                 h.paragraph_format.space_after = Pt(8)
                 # 下边框
@@ -375,7 +392,7 @@ def convert(md_path: Path, docx_path: Path, title: str, subtitle: str):
                 bottom = OxmlElement("w:bottom")
                 bottom.set(qn("w:val"), "single")
                 bottom.set(qn("w:sz"), "8")
-                bottom.set(qn("w:color"), "1F3A5F")
+                bottom.set(qn("w:color"), RULE)
                 bottom.set(qn("w:space"), "3")
                 bdr.append(bottom)
                 p_pr.append(bdr)
@@ -383,14 +400,14 @@ def convert(md_path: Path, docx_path: Path, title: str, subtitle: str):
                 h = doc.add_heading(level=3)
                 r = h.add_run(text)
                 set_run_font(r, name=HEAD_FONT, ea=HEAD_FONT, size=13,
-                             bold=True, color=C_HEAD)
+                             bold=True, color=HEAD)
                 h.paragraph_format.space_before = Pt(11)
                 h.paragraph_format.space_after = Pt(5)
             else:
                 h = doc.add_heading(level=4)
                 r = h.add_run(text)
                 set_run_font(r, name=HEAD_FONT, ea=HEAD_FONT, size=11.5,
-                             bold=True, color=C_ACCENT)
+                             bold=True, color=ACCENT)
                 h.paragraph_format.space_before = Pt(8)
                 h.paragraph_format.space_after = Pt(4)
             i += 1
@@ -420,8 +437,8 @@ def convert(md_path: Path, docx_path: Path, title: str, subtitle: str):
                            size=9.5)
                 for r_ in para.runs:
                     r_.font.bold = True
-                    r_.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
-                cell_shade(cell, "1F3A5F")
+                    r_.font.color.rgb = TBL_TXT
+                cell_shade(cell, TBL_FILL)
             for row in rows:
                 cells = table.add_row().cells
                 for j in range(ncol):
@@ -446,7 +463,7 @@ def convert(md_path: Path, docx_path: Path, title: str, subtitle: str):
             left = OxmlElement("w:left")
             left.set(qn("w:val"), "single")
             left.set(qn("w:sz"), "18")
-            left.set(qn("w:color"), "C0392B")
+            left.set(qn("w:color"), QUOTE_RULE)
             left.set(qn("w:space"), "8")
             bdr.append(left)
             p_pr.append(bdr)
@@ -515,7 +532,8 @@ def main():
             subtitle = args[k + 1]
     if not title:
         title = md.stem
-    convert(md, out, title, subtitle)
+    simple = "--simple" in sys.argv
+    convert(md, out, title, subtitle, simple=simple)
     print(f"OK  {out}  {out.stat().st_size} bytes")
     return 0
 
